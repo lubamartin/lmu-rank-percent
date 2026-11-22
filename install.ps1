@@ -4,11 +4,13 @@
   Restores Driver/Safety Rank percentages in Le Mans Ultimate UI.
 
 .DESCRIPTION
-  Patches RankSquare + RankCard inside Bin\UI.zip so the game shows:
+  Patches RankSquare + RankCard + StandingsPanel inside Bin\UI.zip so the game shows:
   - current progress % on every rank badge (profile, menus, post-race)
   - post-race +/- % change from drChange / srChange
+  - Standings DR badge + approximate Elo % change (toggleable, default on)
 
-  Uses only values the game already receives locally. No RaceControl calls.
+  Rank badges use local game values. Standings DR uses RaceOS player lookup
+  (same API the UI already uses for online profiles) plus a doX-style Elo estimate.
 #>
 [CmdletBinding()]
 param(
@@ -457,12 +459,596 @@ function RankBreakdown({
 }
 '@
 
+$NewStandingsPanelHeader = @'
+function StandingsPanelHeader({
+  mode,
+  onClickMode,
+  onToggleSection,
+  section,
+  sessionInfo: sessionInfo2
+}) {/*LMU-RANK-PERCENT*/
+  const { t: t2 } = useTranslation();
+  const sectionButtons = [
+    {
+      key: "rank",
+      label: "DR/SR",
+      isActive: section.rank !== false,
+      shouldInsert: true
+    },
+    {
+      key: "timing",
+      label: t2("Timing"),
+      isActive: section.timing,
+      shouldInsert: true
+    },
+    {
+      key: "ve",
+      label: t2("VE"),
+      isActive: section.ve,
+      shouldInsert: sessionInfo2.isRaceSession()
+    }
+  ];
+  const modeButtons2 = [
+    {
+      key: "drivers",
+      label: t2("Drivers")
+    },
+    {
+      key: "teams",
+      label: t2("Teams")
+    }
+  ];
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      className: getClassName(classes$5z.standingsPanelHeader, {
+        [classes$5z.expanded]: !!(section.timing || section.ve)
+      }),
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: classes$5z.left, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: getClassName(classes$5z.pos, classes$5z.header), children: t2("Pos") }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "div",
+            {
+              className: getClassName(classes$5z.toggleButtons, classes$5z.modeButtons),
+              children: modeButtons2.map((mb2, i2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                Button,
+                {
+                  type: "text",
+                  onClick: () => onClickMode(mb2.key),
+                  className: getClassName(classes$5z.toggleButton, {
+                    [classes$5z.active]: mb2.key === mode
+                  }),
+                  children: mb2.label
+                },
+                i2
+              ))
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Spacer, {}),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "div",
+            {
+              className: getClassName(
+                classes$5z.toggleButtons,
+                classes$5z.sectionButtons
+              ),
+              children: sectionButtons.map(
+                (section2, i2) => section2.shouldInsert ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  Button,
+                  {
+                    type: "text",
+                    onClick: () => onToggleSection(section2.key),
+                    className: getClassName(classes$5z.toggleButton, {
+                      [classes$5z.active]: section2.isActive
+                    }),
+                    children: section2.label
+                  },
+                  i2
+                ) : null
+              )
+            }
+          )
+        ] }),
+        section.timing && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: classes$5z.timingHeaders, children: [
+          sessionInfo2.isRaceSession() && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: getClassName(classes$5z.header, columnClasses.time), children: t2("Int") }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: getClassName(classes$5z.header, columnClasses.time), children: "S1" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: getClassName(classes$5z.header, columnClasses.time), children: "S2" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: getClassName(classes$5z.header, columnClasses.time), children: "S3" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: getClassName(classes$5z.header, columnClasses.time), children: t2("Lap") }),
+          sessionInfo2.isRaceSession() && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                className: getClassName(classes$5z.header, columnClasses.gain),
+                children: t2("Gain")
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                className: getClassName(classes$5z.header, columnClasses.time),
+                children: t2("Last 5 Avg")
+              }
+            )
+          ] })
+        ] }),
+        section.ve && sessionInfo2.isRaceSession() && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: columnClasses.veWrapper, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: classes$5z.header, children: t2("Last") }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: classes$5z.header, children: t2("5 Lap") }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: classes$5z.header, children: t2("Avg") })
+        ] })
+      ]
+    }
+  );
+}
+'@
+
+$NewStandingsPanelTable = @'
+function StandingsPanelTable({
+  classLiveStandings,
+  mode,
+  section,
+  sessionInfo: sessionInfo2
+}) {/*LMU-RANK-PERCENT*/
+  var _a2;
+  const displayedEntries = classLiveStandings.entries;
+  const { isTeamEvent, multiplayerTeams } = useTeamEvent();
+  const { data: customCars } = useQuery(
+    allAvailableVehiclesOptions("LiveryEditor")
+  );
+  const onlineProfiles = useOnlineProfiles();
+  const showRank = section.rank !== false;
+  const scrollFocusedSlotIntoView = reactExports.useCallback((node2) => {
+    node2.querySelector(`.${classes$5x.row}[data-has-focus="true"]`);
+  }, []);
+  const { hasScrollbar: hasScrollbar2, callbackRef, nodeRef } = useHasScrollbar();
+  const focusedSlotId = (_a2 = classLiveStandings.data.find(
+    (entry2) => entry2.slotHasFocus
+  )) == null ? void 0 : _a2.slotID;
+  reactExports.useEffect(() => {
+    if (focusedSlotId != void 0 && nodeRef.current) {
+      scrollFocusedSlotIntoView(nodeRef.current);
+    }
+  }, [focusedSlotId, nodeRef, scrollFocusedSlotIntoView]);
+  function lmuRpNormProgress(progress) {
+    if (typeof progress !== "number" || !Number.isFinite(progress) || progress < 0) {
+      return 0;
+    }
+    let value2 = progress;
+    if (value2 > 0 && value2 <= 1) {
+      value2 *= 100;
+    }
+    return Math.max(0, Math.min(100, value2));
+  }
+  function lmuRpVisualScore(rankName, tier2, progress) {
+    const rankIndex = { Bronze: 0, Silver: 1, Gold: 2, Platinum: 3 }[rankName];
+    if (rankIndex === void 0) {
+      return void 0;
+    }
+    let level = typeof tier2 === "number" && Number.isFinite(tier2) ? Math.trunc(tier2) : 0;
+    if (rankIndex === 0) {
+      level = Math.max(0, Math.min(3, level));
+    } else {
+      level = Math.max(1, Math.min(3, level));
+    }
+    const pct2 = lmuRpNormProgress(progress);
+    const score = rankIndex === 0 ? level + pct2 / 100 : 4 + (rankIndex - 1) * 3 + (level - 1) + pct2 / 100;
+    const visual = score * 100;
+    return visual > 0 && Number.isFinite(visual) ? visual : void 0;
+  }
+  function lmuRpFindProfile(driverName2) {
+    if (!onlineProfiles || !driverName2) {
+      return void 0;
+    }
+    const exact = onlineProfiles.find((p2) => p2.username === driverName2);
+    if (exact) {
+      return exact;
+    }
+    const lower = String(driverName2).trim().toLowerCase();
+    return onlineProfiles.find((p2) => {
+      var _a3, _b;
+      return String(((_a3 = p2.username) != null ? _a3 : "")).trim().toLowerCase() === lower || String(((_b = p2.name) != null ? _b : "")).trim().toLowerCase() === lower;
+    });
+  }
+  function lmuRpCalcGains(entries) {
+    const INTERNAL_SCALE = 3;
+    const QUALY_WEIGHT = 0.17647058823529413;
+    const K = 30;
+    const D = 420;
+    const LOG = 10;
+    const usable = [];
+    for (const entry2 of entries) {
+      const profile = lmuRpFindProfile(entry2.driverName);
+      const dr = profile == null ? void 0 : profile.driverRank;
+      const visual = lmuRpVisualScore(dr == null ? void 0 : dr.rank, dr == null ? void 0 : dr.tier, dr == null ? void 0 : dr.progress);
+      const racePosition = classLiveStandings.findPositionInClass(entry2);
+      if (!(racePosition > 0) || visual === void 0) {
+        continue;
+      }
+      const qualiPosition = classLiveStandings.findQualiPositionInClass(entry2);
+      usable.push({
+        slotID: entry2.slotID,
+        racePosition,
+        qualiPosition: qualiPosition > 0 ? qualiPosition : 0,
+        visualScore: visual
+      });
+    }
+    const gains = /* @__PURE__ */ new Map();
+    if (usable.length < 2) {
+      return gains;
+    }
+    const scale = K / (2 * (usable.length - 1));
+    const internals = usable.map((e2) => e2.visualScore * INTERNAL_SCALE);
+    for (let i2 = 0; i2 < usable.length; i2++) {
+      let raceDelta = 0;
+      let qualiDelta = 0;
+      for (let j2 = 0; j2 < usable.length; j2++) {
+        if (i2 === j2) {
+          continue;
+        }
+        const expected = 1 / (1 + Math.pow(LOG, (internals[j2] - internals[i2]) / D));
+        const mine = usable[i2];
+        const other = usable[j2];
+        const head = mine.racePosition < other.racePosition ? 1 : mine.racePosition > other.racePosition ? 0 : 0.5;
+        raceDelta += head - expected;
+        if (mine.qualiPosition > 0 && other.qualiPosition > 0) {
+          const qHead = mine.qualiPosition < other.qualiPosition ? 1 : mine.qualiPosition > other.qualiPosition ? 0 : 0.5;
+          qualiDelta += qHead - expected;
+        }
+      }
+      let gain = scale * (raceDelta + QUALY_WEIGHT * qualiDelta);
+      if (!Number.isFinite(gain)) {
+        gain = 0;
+      }
+      gains.set(usable[i2].slotID, Math.round(gain * 10) / 10);
+    }
+    return gains;
+  }
+  const rankGains = showRank ? lmuRpCalcGains(displayedEntries) : /* @__PURE__ */ new Map();
+  function displayTyreColumn(entry2) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      TyreCompoundIndicator,
+      {
+        tyres: [
+          {
+            compound: entry2.tyreCompound("fl"),
+            status: "new"
+          },
+          {
+            compound: entry2.tyreCompound("fr"),
+            status: "new"
+          },
+          {
+            compound: entry2.tyreCompound("rl"),
+            status: "new"
+          },
+          {
+            compound: entry2.tyreCompound("rr"),
+            status: "new"
+          }
+        ]
+      }
+    );
+  }
+  const rankColStyle = {
+    width: "11.8rem",
+    minWidth: "11.8rem",
+    maxWidth: "11.8rem",
+    flexShrink: 0,
+    display: "flex",
+    alignItems: "center",
+    gap: "0.35rem",
+    fontSize: "0.72rem",
+    lineHeight: 1,
+    height: "1.4rem",
+    whiteSpace: "nowrap",
+    marginRight: "0.25rem",
+    fontVariantNumeric: "tabular-nums"
+  };
+  const badgeBoxStyle = {
+    width: "2rem",
+    height: "1.05rem",
+    minWidth: "2rem",
+    flexShrink: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center"
+  };
+  const badgeImgStyle = {
+    width: "2rem",
+    height: "1.05rem",
+    objectFit: "fill",
+    display: "block"
+  };
+  const drSlotStyle = {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.18rem",
+    width: "7.2rem",
+    minWidth: "7.2rem",
+    flexShrink: 0
+  };
+  const srSlotStyle = {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.18rem",
+    width: "4.2rem",
+    minWidth: "4.2rem",
+    flexShrink: 0
+  };
+  const pctCellStyle = {
+    width: "2rem",
+    minWidth: "2rem",
+    textAlign: "right",
+    flexShrink: 0
+  };
+  const gainCellStyle = {
+    width: "2.6rem",
+    minWidth: "2.6rem",
+    textAlign: "right",
+    flexShrink: 0
+  };
+  function formatRankGain(gain) {
+    if (gain == null || !Number.isFinite(gain)) {
+      return "";
+    }
+    const rounded = Math.round(gain * 10) / 10;
+    const body = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    return (rounded > 0 ? "+" : "") + body + "%";
+  }
+  function rankBadgeUrl(kind, rankObj) {
+    if (!(rankObj == null ? void 0 : rankObj.rank) || rankObj.tier === void 0 || rankObj.tier === null) {
+      return null;
+    }
+    const folder = kind === "dr" ? "dr-lmu" : "sr-lmu";
+    return "https://rf2-ui-images-prod.s3.eu-west-1.amazonaws.com/ranks/" + folder + "/" + rankObj.rank + rankObj.tier + "-small.svg";
+  }
+  function renderEqualBadge(kind, rankObj) {
+    const url = rankBadgeUrl(kind, rankObj);
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: badgeBoxStyle, children: url ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: url, alt: "", style: badgeImgStyle }) : null });
+  }
+  function renderRankColumn(entry2) {
+    var _a3, _b;
+    if (!showRank) {
+      return null;
+    }
+    const profile = lmuRpFindProfile(entry2.driverName);
+    const dr = profile == null ? void 0 : profile.driverRank;
+    const sr = profile == null ? void 0 : profile.safetyRank;
+    const hasAny = !!(dr == null ? void 0 : dr.rank) || !!(sr == null ? void 0 : sr.rank);
+    const drPct = (dr == null ? void 0 : dr.rank) ? Math.round(lmuRpNormProgress(dr.progress)) + "%" : "";
+    const srPct = (sr == null ? void 0 : sr.rank) ? Math.round(lmuRpNormProgress(sr.progress)) + "%" : "";
+    const gain = rankGains.get(entry2.slotID);
+    const gainText = formatRankGain(gain);
+    const gainColor = gainText ? gain > 0 ? "#3DDC97" : gain < 0 ? "#FF6B6B" : "#C8C8C8" : "transparent";
+    const tip = [
+      (dr == null ? void 0 : dr.rank) ? "DR " + dr.rank + (((_a3 = dr.tier) != null ? _a3 : "") !== "" ? dr.tier : "") + " " + drPct + (gainText ? " " + gainText : "") : null,
+      (sr == null ? void 0 : sr.rank) ? "SR " + sr.rank + (((_b = sr.tier) != null ? _b : "") !== "" ? sr.tier : "") + " " + srPct : null
+    ].filter(Boolean).join(" · ");
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: __spreadProps(__spreadValues({}, rankColStyle), { opacity: hasAny ? 1 : 0.45 }),
+        title: tip,
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: drSlotStyle, children: [
+            renderEqualBadge("dr", dr),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: pctCellStyle, children: drPct }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: __spreadProps(__spreadValues({}, gainCellStyle), { color: gainColor }), children: gainText || "\xA0" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: srSlotStyle, children: [
+            renderEqualBadge("sr", sr),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: pctCellStyle, children: srPct })
+          ] })
+        ]
+      }
+    );
+  }
+  function renderRow(entry2, isFirstRow) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      StandingsPanelTableRow,
+      {
+        entry: entry2,
+        className: getClassName({
+          [classes$5x.firstRow]: isFirstRow
+        }),
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: classes$5x.leftBackgroundWrapper, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: classes$5x.left, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: classes$5y.posColumn, children: classLiveStandings.displayPositionInClass(entry2) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: classes$5y.logoColumn, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "img",
+                {
+                  src: getLogoUrl(
+                    entry2,
+                    customCars,
+                    classLiveStandings,
+                    isTeamEvent,
+                    multiplayerTeams
+                  ),
+                  alt: ""
+                }
+              ) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: classes$5y.numberColumn, children: entry2.vehicleNumber }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: classes$5y.nameColumn, style: showRank ? { minWidth: 0, maxWidth: "5.8rem" } : void 0, children: /* @__PURE__ */ jsxRuntimeExports.jsx(TextScroll, { text: displayNameColumn(entry2, mode) }) }),
+              renderRankColumn(entry2),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: classes$5y.timeColumn, style: { flexShrink: 0 }, children: displayTimeColumn(
+                entry2,
+                sessionInfo2.isRaceSession(),
+                classLiveStandings.entries[0]
+              ) })
+            ] }),
+            section.timing && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              StandingsPanelTableTiming,
+              {
+                entry: entry2,
+                classLiveStandings,
+                isRaceSession: sessionInfo2.isRaceSession()
+              }
+            ),
+            section.ve && /* @__PURE__ */ jsxRuntimeExports.jsx(StandingsPanelVe, { driverName: entry2.driverName })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: classes$5x.rightBackgroundWrapper, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: classes$5y.tyreColumn, children: displayTyreColumn(entry2) }),
+            entry2.isVirtualEnergyVehicle() && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: classes$5y.virtualEnergyColumn, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(VirtualEnergyBar, { energy: entry2.virtualEnergy }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                entry2.virtualEnergy.toFixed(),
+                "%"
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                className: getClassName(classes$5y.statusColumn, {
+                  [classes$5y.penalty]: entry2.hasPenalty()
+                }),
+                children: entry2.displayStatus()
+              }
+            )
+          ] })
+        ]
+      }
+    );
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      className: getClassName(classes$5x.standingsPanelTable, {
+        [classes$5x.hasScrollbar]: hasScrollbar2
+      }),
+      children: [
+        displayedEntries[0] && renderRow(displayedEntries[0], true),
+        displayedEntries.length > 1 && /* @__PURE__ */ jsxRuntimeExports.jsx(ScrollArea, { ref: callbackRef, className: classes$5x.scrollWrapper, children: displayedEntries.slice(1).map((entry2) => /* @__PURE__ */ jsxRuntimeExports.jsx(reactExports.Fragment, { children: renderRow(entry2, false) }, entry2.slotID)) })
+      ]
+    }
+  );
+}
+'@
+
+$NewStandingsPanel = @'
+function StandingsPanel({
+  classLiveStandings,
+  mainState,
+  sessionInfo: sessionInfo2,
+  sessionGameState
+}) {/*LMU-RANK-PERCENT*/
+  var _a2;
+  const { standingsPanelConfig: config, setStandingsPanelConfig: setConfig } = useWatchTabsContext();
+  const isLoadedReplay = ((_a2 = mainState.state) == null ? void 0 : _a2.settingMode) === "SETTING_REPLAY_PLAYBACK";
+  const showRank = config.section.rank !== false;
+  function onToggleSection(sectionKey) {
+    const current = config.section[sectionKey];
+    const next = sectionKey === "rank" ? current === false : !current;
+    if (sectionKey === "rank") {
+      try {
+        localStorage.setItem("lmu-rp:standings-rank", next ? "1" : "0");
+      } catch (e2) {
+      }
+    }
+    setConfig(__spreadProps(__spreadValues({}, config), {
+      section: __spreadProps(__spreadValues({}, config.section), {
+        [sectionKey]: next
+      })
+    }));
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("article", { className: classes$5y.standingsPanel, style: showRank ? { "--left-width": "29.5rem" } : void 0, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: classes$5y.sessionInfo, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: classes$5y.sessionName, children: sessionInfo2 == null ? void 0 : sessionInfo2.displaySessionName() }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: classes$5y.sessionTime, children: classLiveStandings && sessionGameState ? classLiveStandings.displaySessionRemaining(
+        mainState,
+        sessionGameState.gamePhase
+      ) : "-" })
+    ] }),
+    classLiveStandings && sessionInfo2 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        StandingsPanelHeader,
+        {
+          mode: config.mode,
+          onClickMode: (mode) => setConfig(__spreadProps(__spreadValues({}, config), {
+            mode
+          })),
+          onToggleSection,
+          section: config.section,
+          sessionInfo: sessionInfo2
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        StandingsPanelTable,
+        {
+          classLiveStandings,
+          mode: config.mode,
+          section: config.section,
+          sessionInfo: sessionInfo2,
+          isLoadedReplay
+        }
+      )
+    ] })
+  ] });
+}
+'@
+
+$NewWatchTabsProvider = @'
+function WatchTabsProvider({
+  children
+}) {/*LMU-RANK-PERCENT*/
+  const [userToggledTabs, setUserToggledTabs] = reactExports.useState(null);
+  const [tabsBeforeStints, setTabsBeforeStints] = reactExports.useState(null);
+  const [standingsPanelConfig, setStandingsPanelConfig] = reactExports.useState(() => {
+    let rankOn = true;
+    try {
+      const stored = localStorage.getItem("lmu-rp:standings-rank");
+      if (stored !== null) {
+        rankOn = stored !== "0";
+      }
+    } catch (e2) {
+    }
+    return {
+      mode: "drivers",
+      section: {
+        timing: false,
+        ve: false,
+        rank: rankOn
+      }
+    };
+  });
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    WatchTabsContext.Provider,
+    {
+      value: {
+        userToggledTabs,
+        setUserToggledTabs,
+        tabsBeforeStints,
+        setTabsBeforeStints,
+        standingsPanelConfig,
+        setStandingsPanelConfig
+      },
+      children
+    }
+  );
+}
+'@
+
 function Patch-AppJs {
   param([string]$Js)
   if ($Js.Contains($Marker) -and -not $Force) {
     Write-Host "Already patched (marker found). Use -Force to re-apply from backup."
     return $null
   }
+
+  $patched = $Js
+
+  $sectionDefault = [regex]::Replace(
+    $patched,
+    'section: \{\r?\n      timing: false,\r?\n      ve: false\r?\n    \}',
+    "section: {`n      timing: false,`n      ve: false,`n      rank: true`n    }",
+    1
+  )
+  if ($sectionDefault -eq $patched) {
+    throw "standingsPanelConfig section default not found. Game UI may have changed — update this mod."
+  }
+  $patched = $sectionDefault
 
   $replacements = @(
     @{
@@ -484,10 +1070,29 @@ function Patch-AppJs {
       Pattern = 'function RankBreakdown\(\{[\s\S]*?\n\}\n(?=const podiumDriverWithPointsUpdate)'
       Replacement = $NewRankBreakdown
       Name = "RankBreakdown"
+    },
+    @{
+      Pattern = 'function WatchTabsProvider\(\{[\s\S]*?\n\}\n(?=const GameStateContext)'
+      Replacement = $NewWatchTabsProvider
+      Name = "WatchTabsProvider"
+    },
+    @{
+      Pattern = 'function StandingsPanelHeader\(\{[\s\S]*?\n\}\n(?=const standingsPanel =)'
+      Replacement = $NewStandingsPanelHeader
+      Name = "StandingsPanelHeader"
+    },
+    @{
+      Pattern = 'function StandingsPanelTable\(\{[\s\S]*?\n\}\n(?=function StandingsPanel\()'
+      Replacement = $NewStandingsPanelTable
+      Name = "StandingsPanelTable"
+    },
+    @{
+      Pattern = 'function StandingsPanel\(\{[\s\S]*?\n\}\n(?=const eventWatchView)'
+      Replacement = $NewStandingsPanel
+      Name = "StandingsPanel"
     }
   )
 
-  $patched = $Js
   foreach ($item in $replacements) {
     $match = [regex]::Match($patched, $item.Pattern)
     if (-not $match.Success) {
@@ -609,4 +1214,5 @@ Write-Host "Installed."
 Write-Host "1. Launch LMU"
 Write-Host "2. Open Profile — rank badges should show e.g. 42%"
 Write-Host "3. After an online race — post-race cards show +/- change (e.g. +3.1%)"
+Write-Host "4. Standings panel — DR/SR column on by default (header button DR/SR toggles both)"
 Write-Host "Uninstall: .\uninstall.ps1"
